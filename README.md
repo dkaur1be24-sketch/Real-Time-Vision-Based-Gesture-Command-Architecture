@@ -1,80 +1,98 @@
-# Real-Time-Vision-Based-Gesture-Command-Architecture
-A real-time AI-powered Human-Computer Interaction system that enables control of media and system actions using hand gestures and facial expressions through a webcam.
+Gesture-Based Media Control System using Face Recognition and MediaPipe
 
-This project combines Computer Vision, Face Recognition, and MediaPipe tracking to create a touchless control interface.
+Problem Statement
+In modern computing systems, users still rely heavily on traditional input devices such as keyboards, mice, and touchscreens. These methods are not always efficient, especially in scenarios requiring hands-free interaction.
 
-Features
+This project addresses the need for a natural, contactless, and intelligent human-computer interaction system that allows users to control media and system functions using hand gestures and facial expressions.
 
-👤 Face-Based Personalization
-Detects multiple faces in real time
-Locks control to a single active user
-Ignores strangers for security
-Uses face recognition for identity matching
+Importance:
+Reduces dependency on physical devices
+Enables accessibility for disabled users
+Useful in smart environments (classrooms, IoT systems, automation)
 
-😊 Facial Gesture Control
-Smile Detection (MediaPipe Face Mesh)
-Hold a smile → Automatically opens YouTube video
-
-Uses Mouth Aspect Ratio (MAR) for accurate smile detection
-
-✋ Hand Gesture Controls
-✋ Open Palm → Volume Up
-✊ Closed Fist → Volume Down
-✌ V-Sign → Exit System (Hold gesture)
-
-🎥 Media Automation
-Opens a predefined YouTube video on gesture trigger
-Controls system volume using keyboard simulation
-Can close browser tab automatically
-
-🧠 Smart Interaction System
-Debounce logic prevents accidental triggers
-Gesture holding system for stability
-Multi-face detection with active user tracking
-
-🛠️ Tech Stack
-Python 3.x
-OpenCV
-MediaPipe (Face Mesh + Hands)
-face_recognition
-PyAutoGUI
-Webbrowser module
-
-📷 System Workflow
-Webcam captures real-time video
-Face Recognition locks the primary user
-MediaPipe detects:
-Facial landmarks (smile detection)
-Hand landmarks (gesture control)
-Actions triggered:
-Smile → Open YouTube
-Palm → Volume Up
-Fist → Volume Down
-V-sign → Exit system
-
-Key Concepts Used
-Face Landmark Detection (MediaPipe Face Mesh)
+Methodology:
+Input (Webcam)
+      ↓
+Face Detection + Face Recognition
+      ↓
+Face Mesh (Smile Detection)
+      ↓
 Hand Tracking (MediaPipe Hands)
-Face Recognition Encoding
-Gesture Classification Logic
-Real-time Video Processing
-Human-Computer Interaction (HCI)
+      ↓
+Gesture Classification
+      ↓
+Action Execution
 
-📌 Applications
-Touchless system control
-Smart classrooms
-Accessibility tools for disabled users
-AI-based media automation systems
-Human-computer interaction research
 
-⚠️ Limitations
-Requires good lighting for accuracy
-Performance depends on webcam quality
-Face recognition may slow on low-end devices
+Stages:
+   Input Source: Live webcam feed
+   Preprocessing: Frame resizing, RGB conversion
+Feature Extraction:
+  Face landmarks (MediaPipe Face Mesh)
+  Hand landmarks (MediaPipe Hands)
+Inference:
+  Smile detection using MAR
+  Finger counting logic
+Output:
+  System control (volume, browser, exit)
 
-🔮 Future Improvements
-Add voice commands integration
-Mobile phone gesture control support
-Deep learning-based emotion detection
-GUI dashboard for customization
-Multi-user profile switching
+5. Model Details
+   
+Models Used:
+MediaPipe Face Mesh (468 landmarks model)
+MediaPipe Hands (21 landmarks model)
+face_recognition (dlib-based encoding model)
+
+Input Format:
+RGB frames from webcam (OpenCV)
+
+Frameworks:
+OpenCV
+MediaPipe
+face_recognition (dlib)
+PyAutoGUI
+
+Optimization:
+Frame resizing for faster face recognition
+Encoding interval optimization (every N frames)
+Lightweight landmark-based detection instead of deep CNN
+
+6. Training Details
+Dataset Used:
+  Pre-trained MediaPipe models (Google)
+  face_recognition pre-trained encodings
+Training Procedure:
+  No custom training required
+  Uses pre-trained landmark detection models
+  Face encoding comparison for identity matching
+Performance Graphs:
+  Not applicable (no custom training)
+  Real-time performance evaluated instead
+
+7. Results / Output
+System Output:
+  Smile detection triggers YouTube video playback
+  Open palm increases system volume
+  Closed fist decreases system volume
+  V-sign gesture exits system safely
+
+Performance Metrics:
+  Average FPS: 20–30 FPS (depending on hardware)
+  Low latency real-time gesture response
+  Face recognition delay reduced using frame skipping
+
+  8. Setup Instructions
+     Step 1: Install Dependencies
+     pip install opencv-python mediapipe face-recognition pyautogui numpy
+
+     Step 2: Run Project
+     python facial_gestures.py
+     
+     Step 3: Controls
+     Smile → Open YouTube
+     Palm → Volume Up
+     Fist → Volume Down
+     V-sign → Exit system
+
+  
+     
