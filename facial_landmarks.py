@@ -1,24 +1,22 @@
 import cv2
-import dlib
 import face_recognition
 import mediapipe as mp
 import webbrowser
 import pyautogui
 import time
-from scipy.spatial import distance
 
 # ─────────────────────────────────────────────────────────────
 #  SETTINGS
 # ─────────────────────────────────────────────────────────────
-PREDICTOR_PATH        = r"C:\Users\Diljeet\OneDrive\Desktop\edp_project\shape_predictor_68_face_landmarks.dat"
 YOUTUBE_URL           = "https://www.youtube.com/watch?v=xzUVPN68Ym4"
 
-# Smile threshold  (MAR = mouth width / mouth height)
-# Lower MAR = wider open mouth. Tune by watching the MAR readout on screen.
-MAR_THRESHOLD         = 2.8
+# Smile threshold using MediaPipe Face Mesh
+# Mouth Aspect Ratio (MAR) = mouth width / mouth height
+# Higher MAR = wider smile (mouth open horizontally more than vertically)
+MAR_THRESHOLD         = 1.8
 
 # Debounce frames
-SMILE_FRAMES_REQUIRED = 50     # ~0.67s at 30fps
+SMILE_FRAMES_REQUIRED = 50    # ~0.67s at 30fps
 
 # Volume cooldown (seconds between consecutive volume actions)
 VOLUME_COOLDOWN       = 1.2
@@ -31,28 +29,27 @@ MATCH_TOLERANCE       = 0.5
 ENCODING_INTERVAL     = 10     # re-run face_recognition every N frames
 
 # ID system
-ACTIVE_USER_ID        = "User #1"   # label shown on the locked face's bounding box
+ACTIVE_USER_ID        = "User #1"
 
 # ─────────────────────────────────────────────────────────────
-#  MOUTH LANDMARK INDEXES  (dlib 68-point model)
+#  MEDIAPIPE FACE MESH — MOUTH LANDMARK INDEXES
+#  Reference: https://github.com/google/mediapipe/blob/master/mediapipe/modules/face_geometry/data/canonical_face_model_uv_visualization.png
 # ─────────────────────────────────────────────────────────────
-MOUTH_LEFT   = 48
-MOUTH_RIGHT  = 54
-MOUTH_TOP    = 51
-MOUTH_BOTTOM = 57
+# Outer lip corners (left/right from camera perspective)
+MOUTH_LEFT   = 61
+MOUTH_RIGHT  = 291
+# Outer lip top & bottom (vertical opening)
+MOUTH_TOP    = 13
+MOUTH_BOTTOM = 14
 
 # ─────────────────────────────────────────────────────────────
 #  LOAD MODELS
 # ─────────────────────────────────────────────────────────────
 print("[INFO] Loading models...")
 
-# dlib — face detection + landmarks (for smile)
-detector  = dlib.get_frontal_face_detector()
-predictor = dlib.shape_predictor(PREDICTOR_PATH)
-
-# MediaPipe — hand tracking
-mp_hands   = mp.solutions.hands
-mp_drawing = mp.solutions.drawing_utils
+# MediaPipe — Hand tracking
+mp_hands    = mp.solutions.hands
+mp_drawing  = mp.solutions.drawing_utils
 hands_model = mp_hands.Hands(
     static_image_mode=False,
     max_num_hands=1,
@@ -60,39 +57,51 @@ hands_model = mp_hands.Hands(
     min_tracking_confidence=0.6
 )
 
+# MediaPipe — Face Mesh (replaces dlib for smile detection)
+mp_face_mesh = mp.solutions.face_mesh
+face_mesh    = mp_face_mesh.FaceMesh(
+    static_image_mode=False,
+    max_num_faces=4,            # detect up to 4 faces
+    refine_landmarks=True,
+    min_detection_confidence=0.5,
+    min_tracking_confidence=0.5
+)
+
 print("[INFO] Models loaded.")
 
 # ─────────────────────────────────────────────────────────────
 #  HELPER FUNCTIONS
 # ─────────────────────────────────────────────────────────────
-def mouth_aspect_ratio(landmarks):
-    left   = (landmarks.part(MOUTH_LEFT).x,   landmarks.part(MOUTH_LEFT).y)
-    right  = (landmarks.part(MOUTH_RIGHT).x,  landmarks.part(MOUTH_RIGHT).y)
-    top    = (landmarks.part(MOUTH_TOP).x,     landmarks.part(MOUTH_TOP).y)
-    bottom = (landmarks.part(MOUTH_BOTTOM).x,  landmarks.part(MOUTH_BOTTOM).y)
-    width  = distance.euclidean(left, right)
-    height = distance.euclidean(top, bottom)
+def mouth_aspect_ratio(landmarks, img_w, img_h):
+    """
+    Compute MAR using MediaPipe Face Mesh normalized landmarks.
+    Converts normalized [0,1] coords to pixel coords first.
+    """
+    def px(lm_idx):
+        lm = landmarks.landmark[lm_idx]
+        return int(lm.x * img_w), int(lm.y * img_h)
+
+    lx, ly  = px(MOUTH_LEFT)
+    rx, ry  = px(MOUTH_RIGHT)
+    tx, ty  = px(MOUTH_TOP)
+    bx, by  = px(MOUTH_BOTTOM)
+
+    width  = ((rx - lx) ** 2 + (ry - ly) ** 2) ** 0.5
+    height = ((bx - tx) ** 2 + (by - ty) ** 2) ** 0.5
+
     return (width / height) if height != 0 else 0
 
 
 def count_fingers(hand_landmarks, handedness_label):
     """
     Returns (finger_count, fingers_up_list).
-
-    fingers_up_list is a list of 5 booleans:
-      [thumb, index, middle, ring, pinky]
-
-    Tip landmarks : thumb=4, index=8, middle=12, ring=16, pinky=20
-    PIP landmarks : thumb=3, index=6, middle=10, ring=14, pinky=18
+    fingers_up_list = [thumb, index, middle, ring, pinky]
     """
-    lm = hand_landmarks.landmark
-
-    # Fingers: tip y < pip y  → finger is up (y increases downward in image)
+    lm   = hand_landmarks.landmark
     tips = [8, 12, 16, 20]
     pips = [6, 10, 14, 18]
     fingers = [lm[t].y < lm[p].y for t, p in zip(tips, pips)]
 
-    # Thumb: compare x-axis (direction depends on which hand)
     if handedness_label == "Right":
         thumb_up = lm[4].x < lm[3].x
     else:
@@ -103,18 +112,14 @@ def count_fingers(hand_landmarks, handedness_label):
 
 
 def is_open_palm(finger_count, fingers):
-    """All 5 fingers extended."""
     return finger_count == 5
 
 
 def is_closed_fist(finger_count, fingers):
-    """All fingers folded (thumb may or may not be tucked — allow thumb variation)."""
-    # index, middle, ring, pinky all closed is enough
     return not any(fingers[1:])
 
 
 def is_v_sign(finger_count, fingers):
-    """Index and middle up, ring and pinky down, thumb down."""
     thumb, index, middle, ring, pinky = fingers
     return (index and middle) and (not ring) and (not pinky) and (not thumb)
 
@@ -132,17 +137,15 @@ def put_label(frame, text, pos, color=(255, 255, 255), scale=0.6, thickness=2):
 # ─────────────────────────────────────────────────────────────
 #  STATE VARIABLES
 # ─────────────────────────────────────────────────────────────
-locked_encoding    = None
-last_encoding      = None
+locked_encoding  = None
+last_encoding    = None
 
-smile_counter      = 0
-youtube_opened     = False
+smile_counter    = 0
+youtube_opened   = False
 
-vsign_counter      = 0
-
-last_volume_time   = 0
-
-frame_count        = 0
+vsign_counter    = 0
+last_volume_time = 0
+frame_count      = 0
 
 # ─────────────────────────────────────────────────────────────
 #  START CAMERA
@@ -173,76 +176,83 @@ while True:
     frame_count += 1
     frame = cv2.flip(frame, 1)   # mirror for natural feel
 
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     rgb  = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-
     h, w = frame.shape[:2]
 
     # ══════════════════════════════════════════════════════════
-    #  SECTION A — FACE RECOGNITION + SMILE (dlib)
-    #  Every face gets a bounding box + label.
-    #  Only the locked face (User #1) triggers gestures.
+    #  SECTION A — FACE RECOGNITION (face_recognition lib)
+    #              + SMILE DETECTION (MediaPipe Face Mesh)
     # ══════════════════════════════════════════════════════════
-    faces = detector(gray)
 
-    active_face      = None   # the dlib rect of the locked user (if visible)
-    active_landmarks = None
+    # ── A1: face_recognition for identity locking ─────────────
+    # Downscale for speed (face_recognition is slow at full res)
+    small = cv2.resize(rgb, (0, 0), fx=0.5, fy=0.5)
+    face_locations = face_recognition.face_locations(small)
 
-    if len(faces) == 0:
-        smile_counter = 0
-        put_label(frame, "No face detected", (20, 40), (0, 0, 255))
-
-    else:
-        # ── Throttled bulk encoding (all faces at once) ────────
-        all_encodings = []
+    all_encodings = []
+    if face_locations:
         if frame_count % ENCODING_INTERVAL == 0:
-            all_encodings = face_recognition.face_encodings(rgb)
-            # cache only if we got one per face
-            if len(all_encodings) == len(faces):
-                last_encoding = all_encodings[0]   # cache first face's encoding
+            all_encodings = face_recognition.face_encodings(small, face_locations)
+            if all_encodings:
+                last_encoding = all_encodings[0]
         else:
-            # between refresh frames: use cached encoding for face[0] only
             if last_encoding is not None:
-                all_encodings = [last_encoding] + [None] * (len(faces) - 1)
+                all_encodings = [last_encoding] + [None] * (len(face_locations) - 1)
 
-        # ── Lock first person seen ─────────────────────────────
-        if locked_encoding is None and len(all_encodings) > 0 and all_encodings[0] is not None:
-            locked_encoding = all_encodings[0]
-            print(f"[INFO] {ACTIVE_USER_ID} locked.")
+    # Lock first person seen
+    if locked_encoding is None and all_encodings and all_encodings[0] is not None:
+        locked_encoding = all_encodings[0]
+        print(f"[INFO] {ACTIVE_USER_ID} locked.")
 
-        # ── Draw a box around EVERY face with an ID label ──────
-        for idx, face in enumerate(faces):
-            x1, y1 = face.left(),  face.top()
-            x2, y2 = face.right(), face.bottom()
+    # ── A2: MediaPipe Face Mesh for smile + bounding boxes ────
+    mesh_result = face_mesh.process(rgb)
 
-            enc = all_encodings[idx] if idx < len(all_encodings) else None
+    active_mar    = None
+    active_box_drawn = False
 
-            # Determine if this face matches the locked user
+    if mesh_result.multi_face_landmarks:
+        num_mesh_faces  = len(mesh_result.multi_face_landmarks)
+        num_recog_faces = len(face_locations)
+
+        for idx, face_lm in enumerate(mesh_result.multi_face_landmarks):
+            # ── Derive bounding box from face mesh ─────────────
+            xs = [lm.x for lm in face_lm.landmark]
+            ys = [lm.y for lm in face_lm.landmark]
+            x1 = int(min(xs) * w)
+            y1 = int(min(ys) * h)
+            x2 = int(max(xs) * w)
+            y2 = int(max(ys) * h)
+
+            # Clamp to frame
+            x1, y1 = max(x1, 0), max(y1, 0)
+            x2, y2 = min(x2, w), min(y2, h)
+
+            # ── Match mesh face to recognized face by position ──
+            # Mesh faces & face_recognition faces are ordered similarly.
+            # We match by index (both are top-to-bottom sorted).
             is_active = False
-            if locked_encoding is not None and enc is not None:
-                is_active = face_recognition.compare_faces(
-                    [locked_encoding], enc, tolerance=MATCH_TOLERANCE
-                )[0]
+            if locked_encoding is not None and idx < len(all_encodings):
+                enc = all_encodings[idx]
+                if enc is not None:
+                    is_active = face_recognition.compare_faces(
+                        [locked_encoding], enc, tolerance=MATCH_TOLERANCE
+                    )[0]
             elif locked_encoding is None:
                 is_active = False
 
             if is_active:
-                # Green box + "User #1 (Active)"
                 box_color  = (0, 220, 80)
                 label_text = f"{ACTIVE_USER_ID}  [ACTIVE]"
-                active_face = face
             else:
-                # Red box + "Stranger" or numbered unknown
                 box_color  = (0, 0, 220)
-                stranger_n = idx + 1 if locked_encoding is not None else idx
-                label_text = f"Stranger #{stranger_n}  [ignored]"
-                if locked_encoding is None:
-                    label_text = "Identifying..."
+                stranger_n = idx + 1
+                label_text = (f"Stranger #{stranger_n}  [ignored]"
+                              if locked_encoding is not None else "Identifying...")
 
             # Draw bounding box
             cv2.rectangle(frame, (x1, y1), (x2, y2), box_color, 2)
 
-            # Label background pill above the box
+            # Label background pill
             (tw, th), _ = cv2.getTextSize(label_text, cv2.FONT_HERSHEY_SIMPLEX, 0.52, 1)
             pill_y1 = max(y1 - th - 10, 0)
             pill_y2 = max(y1 - 2, th + 4)
@@ -251,60 +261,68 @@ while True:
                         (x1 + 4, pill_y2 - 4),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.52, (255, 255, 255), 1)
 
-        # ── Only process smile for the locked (active) face ────
-        if active_face is None:
-            # Locked user not visible this frame
+            # ── Draw minimal face mesh dots on active face only ─
+            if is_active:
+                # Draw only the lip contour landmarks for a clean look
+                lip_ids = [61, 185, 40, 39, 37, 0, 267, 269, 270, 409, 291,
+                           375, 321, 405, 314, 17, 84, 181, 91, 146]
+                for lid in lip_ids:
+                    lm = face_lm.landmark[lid]
+                    px_x = int(lm.x * w)
+                    px_y = int(lm.y * h)
+                    cv2.circle(frame, (px_x, px_y), 1, (0, 220, 100), -1)
+
+                # ── GESTURE 1: SMILE → Play YouTube ───────────
+                mar = mouth_aspect_ratio(face_lm, w, h)
+                active_mar = mar
+
+                if mar > MAR_THRESHOLD:
+                    smile_counter += 1
+                    draw_progress_bar(frame, smile_counter,
+                                      SMILE_FRAMES_REQUIRED,
+                                      20, 62, 220, 13, (0, 255, 120))
+                    put_label(frame,
+                              f"Smiling... ({smile_counter}/{SMILE_FRAMES_REQUIRED})",
+                              (20, 58), (0, 255, 120), 0.5)
+
+                    if smile_counter >= SMILE_FRAMES_REQUIRED and not youtube_opened:
+                        print("[ACTION] Smile detected — opening YouTube!")
+                        webbrowser.open(YOUTUBE_URL)
+                        youtube_opened = True
+                else:
+                    smile_counter  = 0
+                    youtube_opened = False
+
+                active_box_drawn = True
+
+        # HUD — active user status
+        if active_box_drawn:
+            put_label(frame, f"{ACTIVE_USER_ID} — controlling", (20, 40), (0, 220, 80))
+        else:
             smile_counter = 0
             put_label(frame, f"{ACTIVE_USER_ID} not in frame", (20, 40), (0, 180, 255))
-        else:
-            put_label(frame, f"{ACTIVE_USER_ID} — controlling", (20, 40), (0, 220, 80))
 
-            active_landmarks = predictor(gray, active_face)
-
-            # Draw face landmarks only on active user
-            for i in range(68):
-                cv2.circle(frame,
-                           (active_landmarks.part(i).x, active_landmarks.part(i).y),
-                           1, (0, 220, 100), -1)
-
-            mar = mouth_aspect_ratio(active_landmarks)
-
-            # ── GESTURE 1: SMILE → Play YouTube ───────────
-            if mar > MAR_THRESHOLD:
-                smile_counter += 1
-                draw_progress_bar(frame, smile_counter,
-                                  SMILE_FRAMES_REQUIRED,
-                                  20, 62, 220, 13, (0, 255, 120))
-                put_label(frame,
-                          f"Smiling... ({smile_counter}/{SMILE_FRAMES_REQUIRED})",
-                          (20, 58), (0, 255, 120), 0.5)
-
-                if smile_counter >= SMILE_FRAMES_REQUIRED and not youtube_opened:
-                    print("[ACTION] Smile detected — opening YouTube!")
-                    webbrowser.open(YOUTUBE_URL)
-                    youtube_opened = True
-            else:
-                smile_counter  = 0
-                youtube_opened = False
-
-            # MAR debug readout
+        # MAR debug readout (only if active face was found)
+        if active_mar is not None:
             put_label(frame,
-                      f"MAR: {mar:.2f}  (threshold > {MAR_THRESHOLD})",
+                      f"MAR: {active_mar:.2f}  (threshold > {MAR_THRESHOLD})",
                       (20, h - 15), (255, 230, 0), 0.45, 1)
 
+    else:
+        smile_counter = 0
+        put_label(frame, "No face detected", (20, 40), (0, 0, 255))
+
     # ══════════════════════════════════════════════════════════
-    #  SECTION B — HAND GESTURES (MediaPipe)
+    #  SECTION B — HAND GESTURES (MediaPipe Hands)
     # ══════════════════════════════════════════════════════════
     hand_result = hands_model.process(rgb)
 
-    gesture_label = ""
     now = time.time()
 
     if hand_result.multi_hand_landmarks:
-        hand_lm       = hand_result.multi_hand_landmarks[0]
-        handedness    = hand_result.multi_handedness[0].classification[0].label
+        hand_lm    = hand_result.multi_hand_landmarks[0]
+        handedness = hand_result.multi_handedness[0].classification[0].label
 
-        # Draw hand skeleton
         mp_drawing.draw_landmarks(
             frame, hand_lm, mp_hands.HAND_CONNECTIONS,
             mp_drawing.DrawingSpec(color=(80, 200, 255), thickness=2, circle_radius=3),
@@ -315,9 +333,8 @@ while True:
 
         # ── GESTURE 2: OPEN PALM → Volume Up ──────────────────
         if is_open_palm(finger_count, fingers):
-            gesture_label = "Open palm — Volume UP"
             draw_progress_bar(frame, 1, 1, 20, 97, 220, 13, (0, 210, 255))
-            put_label(frame, gesture_label, (20, 93), (0, 210, 255), 0.55)
+            put_label(frame, "Open palm — Volume UP", (20, 93), (0, 210, 255), 0.55)
 
             if now - last_volume_time > VOLUME_COOLDOWN:
                 print("[ACTION] Open palm — Volume UP")
@@ -325,13 +342,12 @@ while True:
                 pyautogui.press('volumeup')
                 last_volume_time = now
 
-            vsign_counter = 0   # reset exit counter
+            vsign_counter = 0
 
         # ── GESTURE 3: CLOSED FIST → Volume Down ──────────────
         elif is_closed_fist(finger_count, fingers):
-            gesture_label = "Closed fist — Volume DOWN"
             draw_progress_bar(frame, 1, 1, 20, 127, 220, 13, (255, 140, 0))
-            put_label(frame, gesture_label, (20, 123), (255, 140, 0), 0.55)
+            put_label(frame, "Closed fist — Volume DOWN", (20, 123), (255, 140, 0), 0.55)
 
             if now - last_volume_time > VOLUME_COOLDOWN:
                 print("[ACTION] Closed fist — Volume DOWN")
@@ -344,10 +360,9 @@ while True:
         # ── GESTURE 4: V-SIGN → Close tab + Exit ──────────────
         elif is_v_sign(finger_count, fingers):
             vsign_counter += 1
-            progress_color = (80, 80, 255)
             draw_progress_bar(frame, vsign_counter,
                               VSIGN_FRAMES_REQUIRED,
-                              20, 157, 220, 13, progress_color)
+                              20, 157, 220, 13, (80, 80, 255))
             put_label(frame,
                       f"V-sign — Hold to EXIT ({vsign_counter}/{VSIGN_FRAMES_REQUIRED})",
                       (20, 153), (120, 120, 255), 0.5)
@@ -359,18 +374,18 @@ while True:
                 cap.release()
                 cv2.destroyAllWindows()
                 hands_model.close()
+                face_mesh.close()
                 exit()
 
         else:
-            vsign_counter = 0   # reset if hand is present but no matching gesture
+            vsign_counter = 0
 
-        # Finger count debug
         put_label(frame,
                   f"Fingers: {finger_count}  Hand: {handedness}",
                   (20, h - 35), (200, 200, 255), 0.45, 1)
 
     else:
-        vsign_counter = 0   # reset exit counter when no hand visible
+        vsign_counter = 0
         put_label(frame, "No hand detected", (w - 200, 40), (120, 120, 120), 0.5, 1)
 
     # ── HUD header ──────────────────────────────────────────
@@ -400,4 +415,5 @@ while True:
 cap.release()
 cv2.destroyAllWindows()
 hands_model.close()
+face_mesh.close()
 print("[INFO] Camera released. Goodbye.")
